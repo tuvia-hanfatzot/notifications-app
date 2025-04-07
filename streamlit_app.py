@@ -127,13 +127,30 @@ def deduplicate_headers(columns):
     return new_cols
 
 def process_excel(uploaded_file):
-    df = pd.read_excel(uploaded_file)
+    from openpyxl.utils import get_column_letter
+    from openpyxl import load_workbook
 
-    # Drop first three columns if they are entirely empty
-    for _ in range(3):
-        if df.shape[1] > 0 and df.iloc[:, 0].isna().all():
-            df.drop(df.columns[0], axis=1, inplace=True)
+    uploaded_file.seek(0)
+    workbook = load_workbook(uploaded_file)
+    sheet = workbook.active
 
+    # Detect and delete hidden columns
+    hidden_cols = []
+    for i in range(1, 4):
+        col_letter = get_column_letter(i)
+        if sheet.column_dimensions[col_letter].hidden:
+            hidden_cols.append(i)
+
+    keep_format = len(hidden_cols) == 0
+
+    for i in reversed(hidden_cols):
+        sheet.delete_cols(i)
+
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    buffer.seek(0)
+
+    df = pd.read_excel(buffer)
     df.columns = [str(col).strip().replace('\xa0', ' ').lower() for col in df.columns]
     df.columns = deduplicate_headers(df.columns)
 
@@ -149,20 +166,16 @@ def process_excel(uploaded_file):
     df.insert(2, 'Not recommended', '')
 
     for idx, row in df.iterrows():
-        if pd.isna(row.get("organization name", None)) or str(row.get("organization name", "")).strip() == "":
-            continue  # Skip empty rows
+        if pd.isna(row.get("organization name")) or str(row["organization name"]).strip() == "":
+            continue
 
         total = 0
         outside = []
 
         for i in range(len(lat_cols)):
-            lat_col = lat_cols[i] if i < len(lat_cols) else None
-            lon_col = lon_cols[i] if i < len(lon_cols) else None
-            point_col = point_cols[i] if i < len(point_cols) else None
-
-            lat = row.get(lat_col) if lat_col else None
-            lon = row.get(lon_col) if lon_col else None
-            point_name = row.get(point_col) if point_col else None
+            lat = row.get(lat_cols[i]) if i < len(lat_cols) else None
+            lon = row.get(lon_cols[i]) if i < len(lon_cols) else None
+            point_name = row.get(point_cols[i]) if i < len(point_cols) else None
 
             if pd.isna(lat) and pd.isna(lon) and (pd.isna(point_name) or str(point_name).strip() == ''):
                 continue
@@ -191,7 +204,7 @@ def process_excel(uploaded_file):
         df.at[idx, 'CLA Status'] = status
         df.at[idx, 'Not recommended'] = "All points" if len(outside) == total else ", ".join(outside)
 
-    return df
+    return df, keep_format
 
 def generate_ab_text(df):
     lat_cols = [col for col in df.columns if col.startswith('lat')]
@@ -259,43 +272,39 @@ uploaded_file = st.file_uploader("Upload Excel File", type=["xlsx", "xls"])
 
 if uploaded_file:
     try:
-        df_processed = process_excel(uploaded_file)
+        df_processed, keep_format = process_excel(uploaded_file)
         st.success("Excel file processed successfully!")
 
-        # Get base filename without extension
         base_name = uploaded_file.name.rsplit('.', 1)[0]
-
-        # Prepare processed Excel file
         excel_buffer = io.BytesIO()
 
-        # Load workbook from uploaded file (reset buffer to read again)
-        uploaded_file.seek(0)
-        workbook = load_workbook(uploaded_file)
+        if keep_format:
+            # Preserve original formatting and insert data using openpyxl
+            uploaded_file.seek(0)
+            workbook = load_workbook(uploaded_file)
+            sheet = workbook.active
 
-        # Select first worksheet (or use workbook[sheet_name] if needed)
-        sheet = workbook.active
+            sheet.insert_cols(1, amount=3)
+            sheet.cell(row=1, column=1).value = "CLA SN"
+            sheet.cell(row=1, column=2).value = "CLA Status"
+            sheet.cell(row=1, column=3).value = "Not recommended"
 
-        # Insert new headers in first row and shift others to the right
-        sheet.insert_cols(1, amount=3)
-        sheet.cell(row=1, column=1).value = "CLA SN"
-        sheet.cell(row=1, column=2).value = "CLA Status"
-        sheet.cell(row=1, column=3).value = "Not recommended"
+            for i, row in df_processed.iterrows():
+                sheet.cell(row=i + 2, column=2).value = row['CLA Status']
+                sheet.cell(row=i + 2, column=3).value = row['Not recommended']
 
-        # Fill new columns with processed values
-        for i, row in df_processed.iterrows():
-            sheet.cell(row=i+2, column=2).value = row['CLA Status']
-            sheet.cell(row=i+2, column=3).value = row['Not recommended']
-            # CLA SN remains blank unless filled elsewhere
+            workbook.save(excel_buffer)
+            excel_buffer.seek(0)
 
-        # Save to a buffer without altering styles
-        excel_buffer = io.BytesIO()
-        workbook.save(excel_buffer)
-        excel_buffer.seek(0)
+        else:
+            # Use Pandas to write clean file (e.g., when hidden columns were deleted)
+            with pd.ExcelWriter(excel_buffer, engine='openpyxl', datetime_format='DD/MM/YYYY', date_format='DD/MM/YYYY') as writer:
+                df_processed.to_excel(writer, index=False)
+            excel_buffer.seek(0)
 
         processed_excel_filename = f"{base_name} - Processed Coordinates.xlsx"
         st.download_button("Download Processed Excel", excel_buffer.getvalue(), file_name=processed_excel_filename)
 
-        # Prepare AB text output file
         ab_text = generate_ab_text(df_processed)
         ab_text_filename = f"{base_name} - AB Output.txt"
         st.download_button("Download AB Text File", ab_text, file_name=ab_text_filename)
