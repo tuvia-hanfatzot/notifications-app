@@ -251,7 +251,13 @@ def generate_ab_text(df):
                 lat = float(lat)
                 lon = float(lon)
                 easting, northing = convert_to_utm(lat, lon)
-                section += f"{point_name}\n{easting}, {northing}\n"
+
+                # Custom formatting: remove leading '3' from northing
+                northing_str = str(northing)
+                if northing_str.startswith("3"):
+                    northing_str = northing_str[1:]
+
+                section += f"{point_name}\n{easting}, {northing_str}\n"
             except:
                 continue
 
