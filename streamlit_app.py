@@ -5,9 +5,10 @@ import utm
 import io
 from datetime import datetime
 import json
-from shapely.geometry import Polygon
+import os
 from collections import Counter
 from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 
 def load_boundary_polygon_from_geojson():
     geojson_str = """
@@ -100,12 +101,9 @@ def load_boundary_polygon_from_geojson():
         }
       ]
     }
-    """
-
+    """  # Trimmed for clarity
     geojson_data = json.loads(geojson_str)
     coordinates = geojson_data['features'][0]['geometry']['coordinates'][0]
-
-    # Coordinates are in [lon, lat], but shapely expects (lon, lat) for Point and Polygon
     polygon = Polygon([(lon, lat) for lon, lat in coordinates])
     return polygon
 
@@ -127,30 +125,33 @@ def deduplicate_headers(columns):
     return new_cols
 
 def process_excel(uploaded_file):
-    from openpyxl.utils import get_column_letter
-    from openpyxl import load_workbook
+    ext = uploaded_file.name.lower().split('.')[-1]
 
-    uploaded_file.seek(0)
-    workbook = load_workbook(uploaded_file)
-    sheet = workbook.active
+    keep_format = False
 
-    # Detect and delete hidden columns
-    hidden_cols = []
-    for i in range(1, 4):
-        col_letter = get_column_letter(i)
-        if sheet.column_dimensions[col_letter].hidden:
-            hidden_cols.append(i)
+    if ext == "xls":
+        df = pd.read_excel(uploaded_file)
+    else:
+        uploaded_file.seek(0)
+        workbook = load_workbook(uploaded_file)
+        sheet = workbook.active
 
-    keep_format = len(hidden_cols) == 0
+        hidden_cols = []
+        for i in range(1, 4):
+            col_letter = get_column_letter(i)
+            if sheet.column_dimensions[col_letter].hidden:
+                hidden_cols.append(i)
 
-    for i in reversed(hidden_cols):
-        sheet.delete_cols(i)
+        keep_format = len(hidden_cols) == 0
 
-    buffer = io.BytesIO()
-    workbook.save(buffer)
-    buffer.seek(0)
+        for i in reversed(hidden_cols):
+            sheet.delete_cols(i)
 
-    df = pd.read_excel(buffer)
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+        buffer.seek(0)
+        df = pd.read_excel(buffer)
+
     df.columns = [str(col).strip().replace('\xa0', ' ').lower() for col in df.columns]
     df.columns = deduplicate_headers(df.columns)
 
@@ -215,20 +216,22 @@ def generate_ab_text(df):
     char_count = 0
     cap_marker = "\n----------------------------5000 LETTERS CAP------------------------------\n\n"
 
+    def format_dt(value, fmt):
+        if pd.isna(value) or value == '':
+            return ''
+        if isinstance(value, datetime):
+            return value.strftime(fmt)
+        try:
+            parsed = pd.to_datetime(value)
+            if fmt == '%H:%M':
+                return parsed.strftime('%-H:%M') if os.name != 'nt' else parsed.strftime('%H:%M')
+            return parsed.strftime(fmt)
+        except:
+            return str(value)
+
     for _, row in df.iterrows():
         section = ""
         org = str(row.get('organization name', '')).split(' - ')[0]
-
-        # Format date and time fields cleanly
-        def format_dt(value, fmt):
-            if pd.isna(value) or value == '':
-                return ''
-            if isinstance(value, datetime):
-                return value.strftime(fmt)
-            try:
-                return pd.to_datetime(value).strftime(fmt)
-            except:
-                return str(value)
 
         date_str = format_dt(row.get('date', ''), '%Y-%m-%d')
         start_str = format_dt(row.get('start time', ''), '%H:%M')
@@ -252,7 +255,6 @@ def generate_ab_text(df):
                 lon = float(lon)
                 easting, northing = convert_to_utm(lat, lon)
 
-                # Custom formatting: remove leading '3' from northing
                 northing_str = str(northing)
                 if northing_str.startswith("3"):
                     northing_str = northing_str[1:]
@@ -285,7 +287,6 @@ if uploaded_file:
         excel_buffer = io.BytesIO()
 
         if keep_format:
-            # Preserve original formatting and insert data using openpyxl
             uploaded_file.seek(0)
             workbook = load_workbook(uploaded_file)
             sheet = workbook.active
@@ -303,8 +304,7 @@ if uploaded_file:
             excel_buffer.seek(0)
 
         else:
-            # Use Pandas to write clean file (e.g., when hidden columns were deleted)
-            with pd.ExcelWriter(excel_buffer, engine='openpyxl', datetime_format='DD/MM/YYYY', date_format='DD/MM/YYYY') as writer:
+            with pd.ExcelWriter(excel_buffer, engine='openpyxl', datetime_format='HH:MM', date_format='YYYY-MM-DD') as writer:
                 df_processed.to_excel(writer, index=False)
             excel_buffer.seek(0)
 
